@@ -6,14 +6,19 @@ Projektstruktur seit 0.51.22
 
 Dieses Verzeichnis ist ein eigenstaendiges R4OS-SDK-Projekt fuer ATAPIO.R4D.
 
-Build:
+Build im Repository Repositories/Drivers/ATAPIO:
 
-    cd Code\System\Driver\ATAPIO
-    ..\..\..\DevTools\Zig\zig.exe build
+    Build.bat
+    ./Build.sh
+
+Die Starter lesen die Workspacepfade aus Settings.R4S. Build.bat ist der
+Windows-Starter, Build.sh der Linux-Starter.
 
 Artefakt:
 
-    zig-out\ATAPIO.R4D
+    Artifacts/Modules/ATAPIO/ATAPIO.R4D
+
+Dieser Pfad bezieht sich auf den Workspace-Root und folgt ARTIFACTS_ROOT.
 
 Manifest:
 
