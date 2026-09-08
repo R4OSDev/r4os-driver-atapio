@@ -12,6 +12,7 @@ const ALT_STATUS: u16 = 0x3F6;
 
 const STATUS_ERR: u8 = 0x01;
 const STATUS_DRQ: u8 = 0x08;
+const STATUS_DF: u8 = 0x20;
 const STATUS_BSY: u8 = 0x80;
 
 const CMD_IDENTIFY_DEVICE: u8 = 0xEC;
@@ -126,6 +127,7 @@ fn identifyDisk(disk: *DiskRuntime) bool {
         words[index] = inw(DATA);
     }
 
+    if (!waitNotBusy(disk)) return false;
     disk.sector_count = @as(u64, words[60]) | (@as(u64, words[61]) << 16);
     return true;
 }
@@ -225,7 +227,7 @@ fn readOne(disk: *DiskRuntime, lba: u64, out: []u8) bool {
         out[i + 1] = @truncate(word >> 8);
     }
 
-    return true;
+    return waitNotBusy(disk);
 }
 
 fn writeSectors(disk: *DiskRuntime, start_lba: u64, sectors: u16, data: []const u8) bool {
@@ -290,11 +292,14 @@ fn waitForData(disk: *DiskRuntime) bool {
     var guard: u32 = 0;
     while (guard < 1_000_000) : (guard += 1) {
         const status = inb(STATUS_COMMAND);
+        // Other status bits are invalid while the device is busy.
+        if ((status & STATUS_BSY) != 0) continue;
         if ((status & STATUS_ERR) != 0) {
             _ = inb(ERROR);
             return fail(disk, 40);
         }
-        if ((status & STATUS_BSY) == 0 and (status & STATUS_DRQ) != 0) return true;
+        if ((status & STATUS_DF) != 0) return fail(disk, 42);
+        if ((status & STATUS_DRQ) != 0) return true;
     }
     return fail(disk, 41);
 }
@@ -303,11 +308,14 @@ fn waitNotBusy(disk: *DiskRuntime) bool {
     var guard: u32 = 0;
     while (guard < 1_000_000) : (guard += 1) {
         const status = inb(STATUS_COMMAND);
+        // Other status bits are invalid while the device is busy.
+        if ((status & STATUS_BSY) != 0) continue;
         if ((status & STATUS_ERR) != 0) {
             _ = inb(ERROR);
             return fail(disk, 50);
         }
-        if ((status & STATUS_BSY) == 0) return true;
+        if ((status & STATUS_DF) != 0) return fail(disk, 52);
+        if ((status & STATUS_DRQ) == 0) return true;
     }
     return fail(disk, 51);
 }
