@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.1`
+- Version: `0.1.3`
 - Image target: `/R4OS/DRIVERS/ATAPIO.R4D`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -38,3 +38,7 @@ Detailed German technical notes from the migration are preserved in
 Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
 and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
+
+Busy status is checked before ERR/DF/DRQ; reads and IDENTIFY also validate
+the final completion. Initial status 00h or FFh rejects an absent device
+without entering the bounded command wait or attempting a fallback sector read.

@@ -95,9 +95,8 @@ fn probeDisk(disk: *DiskRuntime) bool {
     disk.usable = false;
     disk.sector_count = 0;
 
-    if (identifyDisk(disk)) {
-        disk.present = true;
-    }
+    if (!identifyDisk(disk)) return false;
+    disk.present = true;
 
     var sector: [SECTOR_SIZE]u8 = undefined;
     if (!readSectors(disk, 0, 1, sector[0..])) {
@@ -118,7 +117,8 @@ fn identifyDisk(disk: *DiskRuntime) bool {
     outb(STATUS_COMMAND, CMD_IDENTIFY_DEVICE);
 
     const initial = inb(STATUS_COMMAND);
-    if (initial == 0) return fail(disk, 10);
+    // A floating legacy bus reads all ones; it is not a busy ATA device.
+    if (initial == 0 or initial == 0xFF) return fail(disk, 10);
     if (!waitForData(disk)) return false;
 
     var words: [256]u16 = undefined;
