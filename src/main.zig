@@ -21,7 +21,8 @@ const CMD_WRITE_SECTORS: u8 = 0x30;
 const CMD_CACHE_FLUSH: u8 = 0xE7;
 
 const SECTOR_SIZE: usize = 512;
-const MAX_TRANSFER_SECTORS: u16 = 8;
+// LBA28 count stays nonzero (1..128); 00h would encode 256 sectors.
+const MAX_TRANSFER_SECTORS: u16 = 128;
 const MAX_LBA28: u64 = 0x0FFF_FFFF;
 
 const DiskRuntime = extern struct {
@@ -197,74 +198,63 @@ fn storageStatus(ctx: ?*anyopaque, out: *r4os.abi.StorageBackendStatus) callconv
     return 0;
 }
 
-fn readSectors(disk: *DiskRuntime, start_lba: u64, sectors: u16, out: []u8) bool {
-    const bytes = validateTransfer(disk, start_lba, sectors, out.len) orelse return false;
-    _ = bytes;
-
-    var i: u16 = 0;
-    while (i < sectors) : (i += 1) {
-        const lba = start_lba + i;
-        const offset = @as(usize, i) * SECTOR_SIZE;
-        if (!readOne(disk, lba, out[offset .. offset + SECTOR_SIZE])) return false;
-    }
-    return true;
-}
-
-fn readOne(disk: *DiskRuntime, lba: u64, out: []u8) bool {
+fn beginTransfer(disk: *DiskRuntime, lba: u64, sectors: u16, command: u8) bool {
     selectDrive(disk, lba);
-    outb(SECTOR_COUNT, 1);
+    // Never overwrite a taskfile while an earlier command still owns DRQ.
+    if (!waitNotBusy(disk)) return false;
+    outb(SECTOR_COUNT, @intCast(sectors));
     outb(LBA_LOW, @truncate(lba));
     outb(LBA_MID, @truncate(lba >> 8));
     outb(LBA_HIGH, @truncate(lba >> 16));
-    outb(STATUS_COMMAND, CMD_READ_SECTORS);
+    outb(STATUS_COMMAND, command);
+    delay400ns();
+    return true;
+}
 
-    if (!waitForData(disk)) return false;
-
-    var i: usize = 0;
-    while (i < SECTOR_SIZE) : (i += 2) {
-        const word = inw(DATA);
-        out[i] = @truncate(word);
-        out[i + 1] = @truncate(word >> 8);
+fn readSectors(disk: *DiskRuntime, start_lba: u64, sectors: u16, out: []u8) bool {
+    _ = validateTransfer(disk, start_lba, sectors, out.len) orelse return false;
+    if (!beginTransfer(disk, start_lba, sectors, CMD_READ_SECTORS)) return false;
+    var sector: usize = 0;
+    while (sector < sectors) : (sector += 1) {
+        if (!waitForData(disk)) return false;
+        const offset = sector * SECTOR_SIZE;
+        var i: usize = 0;
+        while (i < SECTOR_SIZE) : (i += 2) {
+            const word = inw(DATA);
+            out[offset + i] = @truncate(word);
+            out[offset + i + 1] = @truncate(word >> 8);
+        }
+        // READ SECTORS still transfers one sector per DRQ. Allow the device
+        // to advance its state before testing the next data/completion phase.
+        delay400ns();
     }
-
     return waitNotBusy(disk);
 }
 
 fn writeSectors(disk: *DiskRuntime, start_lba: u64, sectors: u16, data: []const u8) bool {
-    const bytes = validateTransfer(disk, start_lba, sectors, data.len) orelse return false;
-    _ = bytes;
-
-    var i: u16 = 0;
-    while (i < sectors) : (i += 1) {
-        const lba = start_lba + i;
-        const offset = @as(usize, i) * SECTOR_SIZE;
-        if (!writeOne(disk, lba, data[offset .. offset + SECTOR_SIZE])) return false;
+    _ = validateTransfer(disk, start_lba, sectors, data.len) orelse return false;
+    if (!beginTransfer(disk, start_lba, sectors, CMD_WRITE_SECTORS)) return false;
+    var sector: usize = 0;
+    while (sector < sectors) : (sector += 1) {
+        if (!waitForData(disk)) return false;
+        const offset = sector * SECTOR_SIZE;
+        var i: usize = 0;
+        while (i < SECTOR_SIZE) : (i += 2) {
+            outw(DATA, @as(u16, data[offset + i]) | (@as(u16, data[offset + i + 1]) << 8));
+        }
+        delay400ns();
     }
+    if (!waitNotBusy(disk)) return false;
+    // Preserve the synchronous callback's existing durability promise:
+    // exactly one flush after the complete request, and no success on error.
     return flushBlock(disk);
-}
-
-fn writeOne(disk: *DiskRuntime, lba: u64, data: []const u8) bool {
-    selectDrive(disk, lba);
-    outb(SECTOR_COUNT, 1);
-    outb(LBA_LOW, @truncate(lba));
-    outb(LBA_MID, @truncate(lba >> 8));
-    outb(LBA_HIGH, @truncate(lba >> 16));
-    outb(STATUS_COMMAND, CMD_WRITE_SECTORS);
-
-    if (!waitForData(disk)) return false;
-
-    var i: usize = 0;
-    while (i < SECTOR_SIZE) : (i += 2) {
-        const word = @as(u16, data[i]) | (@as(u16, data[i + 1]) << 8);
-        outw(DATA, word);
-    }
-
-    return waitNotBusy(disk);
 }
 
 fn flushBlock(disk: *DiskRuntime) bool {
     selectDrive(disk, 0);
+    if (!waitNotBusy(disk)) return false;
     outb(STATUS_COMMAND, CMD_CACHE_FLUSH);
+    delay400ns();
     return waitNotBusy(disk);
 }
 
@@ -292,6 +282,7 @@ fn waitForData(disk: *DiskRuntime) bool {
     var guard: u32 = 0;
     while (guard < 1_000_000) : (guard += 1) {
         const status = inb(STATUS_COMMAND);
+        if (status == 0 or status == 0xFF) return fail(disk, 43);
         // Other status bits are invalid while the device is busy.
         if ((status & STATUS_BSY) != 0) continue;
         if ((status & STATUS_ERR) != 0) {
@@ -308,6 +299,7 @@ fn waitNotBusy(disk: *DiskRuntime) bool {
     var guard: u32 = 0;
     while (guard < 1_000_000) : (guard += 1) {
         const status = inb(STATUS_COMMAND);
+        if (status == 0 or status == 0xFF) return fail(disk, 43);
         // Other status bits are invalid while the device is busy.
         if ((status & STATUS_BSY) != 0) continue;
         if ((status & STATUS_ERR) != 0) {
