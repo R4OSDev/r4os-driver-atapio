@@ -38,7 +38,7 @@ const DiskRuntime = extern struct {
     failures: u64 = 0,
 };
 
-var driver_ctx: r4os.r4dev.DriverContext = undefined;
+var driver_ctx: r4os.r4dev.DriverContext2 = undefined;
 var disks = [_]DiskRuntime{
     .{ .drive_select = 0xE0, .slot = 0 },
     .{ .drive_select = 0xF0, .slot = 1 },
@@ -46,12 +46,12 @@ var disks = [_]DiskRuntime{
 var backends: [disks.len]r4os.abi.StorageBackend = .{r4os.abi.StorageBackend{}} ** disks.len;
 
 comptime {
-    asm (r4os.r4dev.driverEntriesAsm("atapio_init", "atapio_shutdown"));
+    asm (r4os.technical2.driverEntriesAsm("atapio_init", "atapio_shutdown"));
 }
 
-export fn atapio_init(api: *const r4os.r4dev.DriverApi) callconv(.c) i32 {
-    driver_ctx = r4os.r4dev.DriverContext.init(api);
-    if (!driver_ctx.apiCompatible()) {
+export fn atapio_init(api: *const r4os.r4dev.DriverApi2) callconv(.c) i32 {
+    driver_ctx = r4os.r4dev.DriverContext2.init(api);
+    if (!driver_ctx.apiCompatible() or !driver_ctx.requires(.{ "log_error", "log_info", "log_warn", "port_inb", "port_inw", "port_outb", "port_outw", "register_storage_backend" })) {
         driver_ctx.logError("ATAPIO.R4D driver api mismatch");
         return -3;
     }
@@ -260,17 +260,22 @@ fn flushBlock(disk: *DiskRuntime) bool {
 
 fn validateTransfer(disk: *DiskRuntime, start_lba: u64, sectors: u16, buffer_len: usize) ?usize {
     if (sectors == 0 or sectors > MAX_TRANSFER_SECTORS) return failNull(disk, 30);
-    if (start_lba > MAX_LBA28) return failNull(disk, 31);
-    if (start_lba + sectors - 1 > MAX_LBA28) return failNull(disk, 32);
-    const bytes = @as(usize, sectors) * SECTOR_SIZE;
-    if (buffer_len < bytes) return failNull(disk, 33);
-    if (disk.sector_count != 0) {
-        if (start_lba >= disk.sector_count) return failNull(disk, 34);
-        if (@as(u64, sectors) > disk.sector_count - start_lba) return failNull(disk, 35);
-    }
+    const shape = r4os.block_transfer.validate(start_lba, sectors, SECTOR_SIZE, buffer_len, .{
+        .capacity_blocks = disk.sector_count,
+        .max_blocks = MAX_TRANSFER_SECTORS,
+        .max_bytes = MAX_TRANSFER_SECTORS * SECTOR_SIZE,
+        .lba_bits = 28,
+        .buffer_mode = @intFromEnum(r4os.block_transfer.BufferMode.at_least),
+    }) catch |err| return failNull(disk, switch (err) {
+        error.LengthMismatch => 33,
+        error.OutOfRange => if (start_lba > MAX_LBA28) 31 else if (sectors > MAX_LBA28 - start_lba + 1) 32 else if (start_lba >= disk.sector_count) 34 else 35,
+        error.Overflow => if (start_lba > MAX_LBA28) 31 else 32,
+        error.UnknownGeometry => 34,
+        else => 30,
+    });
     disk.last_lba = start_lba;
     disk.last_sectors = sectors;
-    return bytes;
+    return @intCast(shape.byte_count);
 }
 
 fn selectDrive(disk: *DiskRuntime, lba: u64) void {
@@ -279,8 +284,8 @@ fn selectDrive(disk: *DiskRuntime, lba: u64) void {
 }
 
 fn waitForData(disk: *DiskRuntime) bool {
-    var guard: u32 = 0;
-    while (guard < 1_000_000) : (guard += 1) {
+    var budget = r4os.driver_poll_budget.DriverPollBudget.initIterations(1_000_000, .no_sleep);
+    while (budget.step(null, false) == .proceed) {
         const status = inb(STATUS_COMMAND);
         if (status == 0 or status == 0xFF) return fail(disk, 43);
         // Other status bits are invalid while the device is busy.
@@ -296,8 +301,8 @@ fn waitForData(disk: *DiskRuntime) bool {
 }
 
 fn waitNotBusy(disk: *DiskRuntime) bool {
-    var guard: u32 = 0;
-    while (guard < 1_000_000) : (guard += 1) {
+    var budget = r4os.driver_poll_budget.DriverPollBudget.initIterations(1_000_000, .no_sleep);
+    while (budget.step(null, false) == .proceed) {
         const status = inb(STATUS_COMMAND);
         if (status == 0 or status == 0xFF) return fail(disk, 43);
         // Other status bits are invalid while the device is busy.
