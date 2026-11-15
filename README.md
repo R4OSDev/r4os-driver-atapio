@@ -4,13 +4,20 @@
 
 ## Package
 
-- Version: `0.1.4`
+- Version: `0.1.6`
 - Image target: `/R4OS/DRIVERS/ATAPIO.R4D`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Writes finish their complete data/status phase without an implicit CACHE
+FLUSH. The explicit storage flush callback remains the durability barrier;
+the filesystem and page-cache owners issue it at their commit boundaries and
+propagate failure. Callers that need durability must complete that barrier.
+The existing port contract still transfers each sector through 256 word
+accesses. Command/status checks and bounded request geometry are unchanged.
 
 ## Build
 

@@ -244,10 +244,9 @@ fn writeSectors(disk: *DiskRuntime, start_lba: u64, sectors: u16, data: []const 
         }
         delay400ns();
     }
-    if (!waitNotBusy(disk)) return false;
-    // Preserve the synchronous callback's existing durability promise:
-    // exactly one flush after the complete request, and no success on error.
-    return flushBlock(disk);
+    // Complete the data phase here. Cache durability belongs to the explicit
+    // storageFlush callback at the block core's ordered durability boundary.
+    return waitNotBusy(disk);
 }
 
 fn flushBlock(disk: *DiskRuntime) bool {
